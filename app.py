@@ -2,6 +2,7 @@
 
 import streamlit as st
 
+from pdf_flow.invoice_parser import InvoiceBasicInfo, parse_invoice_basic_info
 from pdf_flow.pdf_loader import PdfFileInfo, load_pdf_info
 from pdf_flow.text_extractor import PdfTextExtraction, extract_pdf_text
 from pdf_flow.validators import validate_pdf
@@ -54,6 +55,10 @@ if "extraction_errors" not in st.session_state:
     st.session_state.extraction_errors = []
 if "loaded_pdf_identity" not in st.session_state:
     st.session_state.loaded_pdf_identity = ()
+if "invoice_basic_infos" not in st.session_state:
+    st.session_state.invoice_basic_infos = []
+if "invoice_parse_errors" not in st.session_state:
+    st.session_state.invoice_parse_errors = []
 
 with step1:
     uploaded_files = st.file_uploader(
@@ -99,6 +104,8 @@ with step1:
         st.session_state.loaded_pdf_identity = loaded_identity
         st.session_state.extracted_texts = []
         st.session_state.extraction_errors = []
+        st.session_state.invoice_basic_infos = []
+        st.session_state.invoice_parse_errors = []
 
     loaded_pdfs = st.session_state.loaded_pdfs
     pdf_errors = st.session_state.pdf_errors
@@ -145,6 +152,8 @@ with step2:
                     )
             st.session_state.extracted_texts = extracted_texts
             st.session_state.extraction_errors = extraction_errors
+            st.session_state.invoice_basic_infos = []
+            st.session_state.invoice_parse_errors = []
 
         extracted_texts = st.session_state.extracted_texts
         extraction_errors = st.session_state.extraction_errors
@@ -174,8 +183,57 @@ with step2:
                             f"ページ {page.page_number}: このページから文字情報は取得できませんでした。"
                         )
 
+def format_extracted_value(value: str | int | None) -> str:
+    """抽出値を画面表示用の文字列へ変換する。"""
+    if value is None or value == "":
+        return "未取得"
+    if isinstance(value, int):
+        return f"{value:,}"
+    return str(value)
+
+
 with step3:
-    st.info("この機能は今後のPhaseで実装予定です。")
+    extracted_texts = st.session_state.extracted_texts
+
+    if not extracted_texts:
+        st.info("先に Step 2 でPDFを解析してください。")
+    else:
+        st.write(f"対象PDF: {len(extracted_texts)}件")
+        st.caption("抽出した本文から請求書の基本情報を表示します。")
+
+        invoice_basic_infos: list[InvoiceBasicInfo] = []
+        invoice_parse_errors: list[dict[str, str]] = []
+        for extraction in extracted_texts:
+            try:
+                invoice_basic_infos.append(
+                    parse_invoice_basic_info(extraction.filename, extraction.full_text)
+                )
+            except Exception:
+                invoice_parse_errors.append(
+                    {
+                        "filename": extraction.filename,
+                        "error": "請求書基本情報を抽出できませんでした。",
+                    }
+                )
+        st.session_state.invoice_basic_infos = invoice_basic_infos
+        st.session_state.invoice_parse_errors = invoice_parse_errors
+
+        for item in invoice_parse_errors:
+            st.error(f"{item['filename']}: {item['error']}")
+
+        for info in invoice_basic_infos:
+            with st.expander(info.filename, expanded=True):
+                rows = [
+                    {"項目": "取引先名", "値": format_extracted_value(info.customer_name)},
+                    {"項目": "取引先住所", "値": format_extracted_value(info.customer_address)},
+                    {"項目": "請求書番号", "値": format_extracted_value(info.invoice_number)},
+                    {"項目": "請求日", "値": format_extracted_value(info.invoice_date)},
+                    {"項目": "支払期限", "値": format_extracted_value(info.due_date)},
+                    {"項目": "税抜金額", "値": format_extracted_value(info.subtotal)},
+                    {"項目": "消費税", "値": format_extracted_value(info.tax)},
+                    {"項目": "請求金額（税込）", "値": format_extracted_value(info.total)},
+                ]
+                st.dataframe(rows, hide_index=True, width="stretch")
 
 with step4:
     st.info("この機能は今後のPhaseで実装予定です。")
