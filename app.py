@@ -2,6 +2,7 @@
 
 import streamlit as st
 
+from pdf_flow.invoice_detail_parser import InvoiceDetails, parse_invoice_details
 from pdf_flow.invoice_parser import InvoiceBasicInfo, parse_invoice_basic_info
 from pdf_flow.pdf_loader import PdfFileInfo, load_pdf_info
 from pdf_flow.text_extractor import PdfTextExtraction, extract_pdf_text
@@ -59,6 +60,10 @@ if "invoice_basic_infos" not in st.session_state:
     st.session_state.invoice_basic_infos = []
 if "invoice_parse_errors" not in st.session_state:
     st.session_state.invoice_parse_errors = []
+if "invoice_details" not in st.session_state:
+    st.session_state.invoice_details = []
+if "invoice_detail_errors" not in st.session_state:
+    st.session_state.invoice_detail_errors = []
 
 with step1:
     uploaded_files = st.file_uploader(
@@ -106,6 +111,8 @@ with step1:
         st.session_state.extraction_errors = []
         st.session_state.invoice_basic_infos = []
         st.session_state.invoice_parse_errors = []
+        st.session_state.invoice_details = []
+        st.session_state.invoice_detail_errors = []
 
     loaded_pdfs = st.session_state.loaded_pdfs
     pdf_errors = st.session_state.pdf_errors
@@ -154,6 +161,8 @@ with step2:
             st.session_state.extraction_errors = extraction_errors
             st.session_state.invoice_basic_infos = []
             st.session_state.invoice_parse_errors = []
+            st.session_state.invoice_details = []
+            st.session_state.invoice_detail_errors = []
 
         extracted_texts = st.session_state.extracted_texts
         extraction_errors = st.session_state.extraction_errors
@@ -183,12 +192,17 @@ with step2:
                             f"ページ {page.page_number}: このページから文字情報は取得できませんでした。"
                         )
 
-def format_extracted_value(value: str | int | None) -> str:
+
+def format_extracted_value(value: str | int | float | None) -> str:
     """抽出値を画面表示用の文字列へ変換する。"""
     if value is None or value == "":
         return "未取得"
+    if isinstance(value, float) and value.is_integer():
+        return f"{int(value):,}"
     if isinstance(value, int):
         return f"{value:,}"
+    if isinstance(value, float):
+        return str(value)
     return str(value)
 
 
@@ -199,10 +213,12 @@ with step3:
         st.info("先に Step 2 でPDFを解析してください。")
     else:
         st.write(f"対象PDF: {len(extracted_texts)}件")
-        st.caption("抽出した本文から請求書の基本情報を表示します。")
+        st.caption("抽出した本文から請求書の基本情報と明細を表示します。")
 
         invoice_basic_infos: list[InvoiceBasicInfo] = []
         invoice_parse_errors: list[dict[str, str]] = []
+        invoice_details_list: list[InvoiceDetails] = []
+        invoice_detail_errors: list[dict[str, str]] = []
         for extraction in extracted_texts:
             try:
                 invoice_basic_infos.append(
@@ -215,14 +231,46 @@ with step3:
                         "error": "請求書基本情報を抽出できませんでした。",
                     }
                 )
+                invoice_basic_infos.append(
+                    InvoiceBasicInfo(
+                        filename=extraction.filename,
+                        customer_name=None,
+                        customer_address=None,
+                        invoice_number=None,
+                        invoice_date=None,
+                        due_date=None,
+                        subtotal=None,
+                        tax=None,
+                        total=None,
+                    )
+                )
+            try:
+                invoice_details_list.append(
+                    parse_invoice_details(extraction.filename, extraction.full_text)
+                )
+            except Exception:
+                invoice_detail_errors.append(
+                    {
+                        "filename": extraction.filename,
+                        "error": "請求明細を抽出できませんでした。",
+                    }
+                )
+                invoice_details_list.append(
+                    InvoiceDetails(filename=extraction.filename, items=())
+                )
         st.session_state.invoice_basic_infos = invoice_basic_infos
         st.session_state.invoice_parse_errors = invoice_parse_errors
+        st.session_state.invoice_details = invoice_details_list
+        st.session_state.invoice_detail_errors = invoice_detail_errors
 
         for item in invoice_parse_errors:
             st.error(f"{item['filename']}: {item['error']}")
+        for item in invoice_detail_errors:
+            st.error(f"{item['filename']}: {item['error']}")
 
-        for info in invoice_basic_infos:
+        for info, details in zip(invoice_basic_infos, invoice_details_list, strict=True):
             with st.expander(info.filename, expanded=True):
+                st.markdown("**基本情報**")
                 rows = [
                     {"項目": "取引先名", "値": format_extracted_value(info.customer_name)},
                     {"項目": "取引先住所", "値": format_extracted_value(info.customer_address)},
@@ -234,6 +282,29 @@ with step3:
                     {"項目": "請求金額（税込）", "値": format_extracted_value(info.total)},
                 ]
                 st.dataframe(rows, hide_index=True, width="stretch")
+
+                st.markdown("**請求明細**")
+                if details.item_count() == 0:
+                    st.warning("明細を取得できませんでした。")
+                else:
+                    st.write(f"明細件数: {details.item_count()}件")
+                    st.write(f"明細合計: {details.amount_total():,}円")
+                    if info.subtotal is None:
+                        st.caption("税抜金額が未取得のため、明細合計との比較はできません。")
+                    elif details.amount_total() == info.subtotal:
+                        st.success("明細合計と税抜金額は一致しています。")
+                    else:
+                        st.warning("明細合計と税抜金額が一致しません。")
+                    detail_rows = [
+                        {
+                            "品目": item.item_name,
+                            "数量": format_extracted_value(item.quantity),
+                            "単価": format_extracted_value(item.unit_price),
+                            "明細金額": format_extracted_value(item.amount),
+                        }
+                        for item in details.items
+                    ]
+                    st.dataframe(detail_rows, hide_index=True, width="stretch")
 
 with step4:
     st.info("この機能は今後のPhaseで実装予定です。")
